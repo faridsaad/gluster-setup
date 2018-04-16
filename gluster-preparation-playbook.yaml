@@ -1,0 +1,145 @@
+#
+##
+## gluster-preparation-playbook.yaml: Playbook to prepare infranodes to host gluster pods and volumes
+##
+## NOTE: Make sure to 'oc login' as cluster admin user to be able to
+##       complete gluster set up.
+##
+## Steps required in ansible install box before running this playbook:
+##   - subscription-manager repos --enable=rh-gluster-3-for-rhel-7-server-rpms
+##   - yum install cns-deploy heketi-client
+##   - Ensure 'oc login' as cluster-admin is done
+##   - Update variables with proper pool and devices in inventory file (gs_gluster_pool, etc)
+##
+## To dry-run:
+##   ansible-playbook -i {inventory_file} gluster-preparation-playbook.yaml --list-hosts --list-tasks
+##
+## To run:
+##   ansible-playbook -i {inventory_file} gluster-preparation-playbook.yaml
+##
+## To run for an additional gluster cluster 'glusterapp':
+##   ansible-playbook -i {inventory_file} gluster-preparation-playbook.yaml -e 'storage_region=glusterapp'
+##
+#
+
+- hosts: all
+
+  tasks:
+  - group_by:
+      key: "group_{{ openshift_node_labels['storage_region'] }}"
+    ignore_errors: yes
+
+- hosts: "group_{{ storage_region }}"
+  gather_facts: yes
+
+  tasks:
+
+  - name: Verify if all desired storage nodes are attached to proper gluster pool
+    shell: subscription-manager list --consumed --pool-only|grep {{ gs_gluster_pool }}
+    register: gluster_pool_attached
+    ignore_errors: true
+
+  - name: Attach storage nodes to the appropriate gluster pool-id
+    shell: subscription-manager attach --pool={{ gs_gluster_pool }}
+    when: gluster_pool_attached.rc != 0
+
+  - name: Copy /etc/sysconfig/iptables into place
+    copy:
+      src: files/iptables/infranode
+      dest: /etc/sysconfig/iptables
+      owner: root
+      group: root
+      mode: 0600
+      backup: yes
+
+  - name: restart iptables
+    systemd:
+      name: iptables
+      state: restarted
+
+  - name: restart docker
+    systemd:
+      name: docker
+      state: restarted
+
+  - name: restart openshift node
+    systemd:
+      name: atomic-openshift-node
+      state: restarted
+
+  - name: enable dm_thin_pool
+    shell: modprobe dm_thin_pool
+
+  - name: configure dm_thin_pool
+    shell: echo dm_thin_pool > /etc/modules-load.d/dm_thin_pool.conf
+
+  - name: enable dm_multipath
+    shell: modprobe dm_multipath
+
+  - name: configure dm_multipath
+    shell: echo dm_multipath > /etc/modules-load.d/dm_multipath.conf
+
+  - name: enable target_core_user
+    shell: modprobe target_core_user
+
+  - name: configure target_core_user
+    shell: echo target_core_user > /etc/modules-load.d/target_core_user.conf
+
+  - name: Create targetcli backup directory
+    file:
+      name: /etc/target/backup
+      mode: 0755
+      state: directory
+      owner: root
+      group: root
+
+
+- hosts: all
+
+  tasks:
+  - name: Enable gluster repos across cluster
+    shell: subscription-manager repos --enable="rh-gluster-3-client-for-rhel-7-server-rpms"
+
+  - name: Ensure glusterfs-fuse is installed and up to date
+    yum: 
+      name: glusterfs-fuse
+      state: latest
+
+
+- hosts: 'all:!masters'
+
+  tasks:
+  - name: Ensure iscsi-initiator-utils and device-mapper-multipath are installed
+    yum:
+      name: "{{ item }}"
+      state: latest 
+    with_items:
+      - iscsi-initiator-utils
+      - device-mapper-multipath
+
+  - name:  Enable mpath
+    shell: /usr/sbin/mpathconf --enable
+
+  - name: Copy /etc/multipath.conf into place
+    copy: 
+      src: files/multipath/multipath.conf
+      dest: /etc/multipath.conf
+      owner: root
+      group: root
+      mode: 0600
+      backup: yes
+
+  - name: enable and restart multipathd service
+    systemd:
+      name: multipathd
+      state: restarted
+      enabled: yes
+
+  - name: add wants for rpcbind
+    shell: systemctl add-wants multi-user rpcbind.service
+
+  - name: Enable and Start rpcbind
+    systemd: 
+      name: rpcbind
+      state: restarted
+      enabled: yes
