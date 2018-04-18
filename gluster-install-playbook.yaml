@@ -1,0 +1,85 @@
+#
+##
+## gluster-install-playbook.yaml: Playbook to install Gluster cluster in OpenShift infranodes
+##
+## NOTE: Make sure to 'oc login' as cluster admin user to be able to
+##       complete gluster set up.
+##
+## Steps required in ansible install box before running this playbook:
+##   - Run gluster-preparation-playbook.yaml
+##   - Ensure 'oc login' as cluster-admin is done
+##   - Update variables with proper pool and devices in inventory file (gs_gluster_pool, etc)
+##
+## To dry-run:
+##   ansible-playbook -i {inventory_file} gluster-install-playbook.yaml --list-hosts --list-tasks
+##
+## To run:
+##   ansible-playbook -i {inventory_file} gluster-install-playbook.yaml -e 'storage_region=appstorage storage_project=mystorageproject device=/dev/sdf'
+##
+#
+
+- hosts: localhost
+
+  tasks:
+  - name: Validate OC is installed and logged in
+    shell: oc whoami 
+
+  - set_fact:
+      storage_project: "{{ storage_project | default(gs_gluster_storage_project) }}"
+
+  - set_fact:
+      storage_device : "{{ device | default(gs_gluster_storage_device) }}"
+
+  - name: Set up gluster storage project
+    shell: oc adm new-project --node-selector="" {{ storage_project }}
+    ignore_errors: true
+
+  - name: Select as active project
+    shell: oc project {{ storage_project }}
+
+  - name: update privileges for default account in new project
+    shell: oc adm policy add-scc-to-user privileged -z default
+
+- hosts: all
+  tasks:
+  - group_by:
+      key: "group_{{ openshift_node_labels['storage_region'] }}"
+    ignore_errors: yes
+
+- hosts: "group_{{ storage_region }}"
+  tasks: 
+
+  - set_fact:
+      cluster_group: "group_{{ storage_region }}"
+
+  - name: Fail if cluster size is not correct
+    fail: 
+      msg: "Cluster size needs to be exactly three nodes. {{ play_hosts|length }} found."
+    when: play_hosts|length != 3
+    run_once: true
+    delegate_to: localhost
+
+  - name: Generate topology.json based on inventory infranodes grouping
+    template:
+      src: templates/heketi/topology.json.j2
+      dest: "/tmp/topology-{{ storage_region }}.json"
+    delegate_to: localhost
+    run_once: true
+
+- hosts: localhost
+  tasks:
+  - name: attach localhost to proper repo
+    shell: subscription-manager repos --enable="rh-gluster-3-for-rhel-7-server-rpms"
+    ignore_errors: true
+
+  - name: Install required setup packages
+    yum:
+      name: "{{ item }}"
+      state: latest 
+    with_items:
+      - cns-deploy
+      - heketi-client
+      - glusterfs-fuse
+   
+  - name: Deploy CNS 
+    shell: cns-deploy -y -v -g -n "{{ hostvars[groups['masters'][0]]['storage_project'] }}" --admin-key "{{ hostvars[groups['masters'][0]]['gs_heketi_api_admin_key'] }}" --user-key "{{ hostvars[groups['masters'][0]]['gs_heketi_api_user_key'] }}" --block-host "{{ hostvars[groups['masters'][0]]['gs_gluster_block_host_gb'] }}" "/tmp/topology-{{ storage_region }}.json"
