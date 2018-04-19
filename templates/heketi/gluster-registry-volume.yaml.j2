@@ -1,0 +1,15 @@
+kind: PersistentVolume
+apiVersion: v1
+metadata:
+  name: gluster-registry-volume
+  labels:
+    glusterfs: registry-volume
+spec:
+  capacity:
+    storage: {{ gs_gluster_registry_volume_size }}Gi
+  glusterfs:
+    endpoints: gluster-registry-endpoints
+    path: gluster-registry-volume
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
