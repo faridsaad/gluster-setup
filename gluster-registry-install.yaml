@@ -1,0 +1,116 @@
+#
+##
+## gluster-registry-install.yaml: Playbook to automate conversion of ephemeral storage docker registry
+##                                to CNS Gluster backed.
+##
+## NOTE: Make sure to 'oc login' as cluster admin user to be able to
+##       complete gluster set up.
+##
+## Available parameters:
+##
+##   - Remove previous volume/endpoints/service attempts:
+##     ansible-playbook -i hosts gluster-registry-install.yaml -e 'delete_current=true'
+##
+##
+#
+
+- hosts: infranodes
+  gather_facts: true
+  tasks:
+  - name: get facts
+    shell: uptime
+
+- hosts: localhost
+  connection: local
+
+  vars:
+    gluster_registry_endpoint_name: 'gluster-registry-endpoints'
+    delete_current: false
+  
+  tasks:
+  - name: Validate OC is installed and logged in
+    shell: /usr/bin/oc whoami
+    register: whoami
+    failed_when: whoami.rc != 0
+
+  - name: Switch to default project 
+    shell: oc project default
+
+  - name: delete endpoints if they exist
+    shell: /usr/bin/oc delete endpoints {{ gluster_registry_endpoint_name }}
+    when: delete_current
+    ignore_errors: true
+
+  - name: delete service if it exists (to recreate)
+    shell: oc delete service {{ gluster_registry_endpoint_name }}
+    when: delete_current
+    ignore_errors: true
+
+  - name: Get the current volume if it exists
+    shell:  heketi-cli volume list --user=admin --secret={{ gs_heketi_api_admin_key }} -s http://{{ heketi_route.stdout }}|grep gluster-registry-volume|awk '{print $1}'
+    when: delete_current
+    register: current_volume
+
+  - name: Delete current volume if found
+    shell:  heketi-cli volume list --user=admin --secret={{ gs_heketi_api_admin_key }} -s http://{{ heketi_route.stdout }}|grep gluster-registry-volume|awk '{print $1}'
+    when: delete_current and current_volume.rc == 0
+
+  - name: Create docker registry endpoints definition file
+    template: 
+      src: templates/heketi/gluster-registry-endpoints.yaml.j2
+      dest: /tmp/gluster-registry-endpoints.yaml
+
+  - name: Import docker registry endpoints definition file
+    shell: /usr/bin/oc create -f /tmp/gluster-registry-endpoints.yaml
+
+  - name: Create docker registry service definition file
+    template: 
+      src: templates/heketi/gluster-registry-service.yaml.j2
+      dest: /tmp/gluster-registry-service.yaml
+
+  - name: Create service associated with endpoints
+    shell: /usr/bin/oc create -f /tmp/gluster-registry-service.yaml
+  
+  - name: Obtain fsGroup GID of docker-registry pods
+    shell: /usr/bin/oc get pod --selector="docker-registry=default" -o jsonpath='{range .items[0].spec}{.securityContext.fsGroup}{end}'
+    register: fsgroup_gid
+
+  - name: Get Heketi route from storage project
+    shell: /usr/bin/oc get route heketi -n {{ gs_gluster_storage_project }} -o jsonpath='{.spec.host}'
+    register: heketi_route
+
+  - name: Create registry gluster volume
+    shell: heketi-cli volume create --size={{ gs_gluster_registry_volume_size }} --name=gluster-registry-volume --gid={{ fsgroup_gid.stdout }} --secret={{ gs_heketi_api_admin_key }} --user=admin -s http://{{ heketi_route.stdout }}
+
+  - name: Create registry PV template
+    template: 
+      src: templates/heketi/gluster-registry-volume.yaml.j2
+      dest: /tmp/gluster-registry-volume.yaml
+
+  - name: Import registry PV template
+    shell: /usr/bin/oc create -f /tmp/gluster-registry-volume.yaml 
+
+  - name: Create registry PVC template
+    template: 
+      src: templates/heketi/gluster-registry-claim.yaml.j2
+      dest: /tmp/gluster-registry-claim.yaml
+
+  - name: Import registry PVC template
+    shell: /usr/bin/oc create -f /tmp/gluster-registry-claim.yaml
+
+  - name: Scale down the current registry
+    shell: /usr/bin/oc scale dc docker-registry --replicas=0
+
+  - name: Give some time for pods to terminate
+    wait_for: timeout=30
+    delegate_to: localhost
+
+  - name: Patch the registry deployment config
+    shell: /usr/bin/oc volume dc/docker-registry --add --overwrite --name=registry-storage --type=persistentVolumeClaim --claim-name=gluster-registry-claim
+
+  - name: Give some time before we scale up
+    wait_for: timeout=10
+    delegate_to: localhost
+
+  - name: Scale the Registry up
+    shell: /usr/bin/oc scale dc docker-registry --replicas=1
