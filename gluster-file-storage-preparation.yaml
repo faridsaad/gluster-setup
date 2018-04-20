@@ -21,9 +21,6 @@
       key: "group_{{ openshift_node_labels['storage_region'] }}"
     ignore_errors: yes
 
-- hosts: "group_{{ storage_region }}"
-  gather_facts: yes
-  tasks:
   - name: get facts
     shell: uptime
 

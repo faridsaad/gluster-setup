@@ -9,16 +9,21 @@
 ## Available parameters:
 ##
 ##   - Remove previous volume/endpoints/service attempts:
-##     ansible-playbook -i hosts gluster-registry-install.yaml -e 'delete_current=true'
+##     ansible-playbook -i hosts gluster-registry-install.yaml -e 'storage_region=az1'
 ##
 ##
 #
 
-- hosts: infranodes
-  gather_facts: true
+- hosts: all
+
   tasks:
+  - group_by:
+      key: "group_{{ openshift_node_labels['storage_region'] }}"
+    ignore_errors: yes
+
   - name: get facts
     shell: uptime
+
 
 - hosts: localhost
   connection: local
@@ -35,6 +40,9 @@
 
   - name: Switch to default project 
     shell: oc project default
+
+  - set_fact:
+      gs_heketi_api_admin_key: "{{ hostvars[groups['masters'][0]]['gs_heketi_api_admin_key'] }}"
 
   - name: delete endpoints if they exist
     shell: /usr/bin/oc delete endpoints {{ gluster_registry_endpoint_name }}
