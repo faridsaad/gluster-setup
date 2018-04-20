@@ -1,0 +1,85 @@
+#
+##
+## gluster-file-storage-preparation.yaml: Playbook to configure file-based CNS storage in OpenShift
+##
+## NOTE: Make sure to 'oc login' as cluster admin user to be able to
+##       complete gluster set up.
+##
+## Available parameters:
+##       - "myproject" defaults to gstorage01.
+##       - "storage_region": Expected to be a label on the hosts you want Gluster on.
+##
+##     ansible-playbook -i hosts gluster-file-storage-preparation.yaml -e 'storage_region=glusterapp myproject=gstorage02'
+##
+##
+#
+
+- hosts: all
+
+  tasks:
+  - group_by:
+      key: "group_{{ openshift_node_labels['storage_region'] }}"
+    ignore_errors: yes
+
+- hosts: "group_{{ storage_region }}"
+  gather_facts: yes
+  tasks:
+  - name: get facts
+    shell: uptime
+
+- hosts: localhost
+  connection: local
+
+  vars:
+    delete_current: false
+  
+  tasks:
+  - name: Validate OC is installed and logged in
+    shell: /usr/bin/oc whoami
+    register: whoami
+    failed_when: whoami.rc != 0
+
+  - name: Switch to default project 
+    shell: oc project default
+
+  - set_fact:
+      storage_project: "{{ storage_project | default(gs_gluster_storage_project) }}"
+
+  - set_fact:
+      cluster_group: "group_{{ storage_region }}"
+
+  - set_fact:
+      gs_heketi_api_admin_key: "{{ hostvars[groups['masters'][0]]['gs_heketi_api_admin_key'] }}"
+
+  - name: encode heketi_secret
+    shell: echo -n {{ gs_heketi_api_admin_key }} | /usr/bin/base64
+    register: gs_heketi_secret_base64
+
+  - name: Create heketi secret yaml
+    template:
+      src: templates/heketi/glusterfs-heketi-secret-file.yaml.j2
+      dest: /tmp/glusterfs-secret-file.yaml
+
+  # FIX(farid): Assuming secret exists is not the best idea for
+  # handling failures.
+  - name: Import heketi secret yaml
+    shell: cat /tmp/glusterfs-secret-file.yaml | oc create -f -
+    ignore_errors: true
+
+  - name: Get Heketi route from storage project
+    shell: /usr/bin/oc get route heketi -n {{ storage_project }} -o jsonpath='{.spec.host}'
+    register: heketi_route
+
+  - name: Create storageclass definition
+    template: 
+      src: templates/heketi/glusterfs-file-storageclass.yaml.j2
+      dest: /tmp/glusterfs-file-storageclass.yaml
+
+  - name: Import storageclass definition
+    shell: oc create -f /tmp/glusterfs-file-storageclass.yaml
+
+  - name: Make gluster-block non-default storageClass
+    shell: "/usr/bin/oc patch storageclass gluster-block -p '{\"metadata\": {\"annotations\": {\"storageclass.kubernetes.io/is-default-class\": \"false\"}}}'"
+
+  - name: Make new file StorageClass default
+    shell: "/usr/bin/oc patch storageclass {{ cluster_name | default('gluster') }}-file -p '{\"metadata\": {\"annotations\": {\"storageclass.kubernetes.io/is-default-class\": \"true\"}}}'"
