@@ -38,11 +38,25 @@
     register: whoami
     failed_when: whoami.rc != 0
 
+  - name: Validate storage_region is defined
+    fail:
+      msg: "Need to define storage_region"
+    when: storage_region is undefined
+
+  - set_fact:
+      cluster_group: "group_{{ storage_region }}"
+
   - name: Switch to default project 
     shell: oc project default
 
   - set_fact:
       gs_heketi_api_admin_key: "{{ hostvars[groups['masters'][0]]['gs_heketi_api_admin_key'] }}"
+
+  - set_fact:
+      gs_gluster_storage_project: "{{ hostvars[groups['masters'][0]]['gs_gluster_storage_project'] }}"
+
+  - set_fact:
+      gs_gluster_registry_volume_size: "{{ hostvars[groups['masters'][0]]['gs_gluster_registry_volume_size'] }}"
 
   - name: delete endpoints if they exist
     shell: /usr/bin/oc delete endpoints {{ gluster_registry_endpoint_name }}

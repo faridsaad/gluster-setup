@@ -4,8 +4,8 @@ metadata:
   name: {{ gluster_registry_endpoint_name }}
 subsets:
 - addresses:
-{% for host in groups['infranodes'] %}
-  - ip: {{ hostvars[host]['ansible_eth0']['ipv4']['address'] }}
+{% for host in groups[cluster_group] %}
+  - ip: {{ hostvars[host]['ansible_default_ipv4']['address'] }}
 {% endfor %}
   ports:
   - port: 1
